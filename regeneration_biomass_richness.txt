@@ -1,0 +1,294 @@
+R script to calculate biomass and species richness
+rm(list=ls())
+
+setwd("c:/RData/remnants")
+
+###packages/libraries to be used
+library(dplyr)
+library(rio)
+library(data.table)
+library(tidyr)
+library(stringr)
+
+##There are three main datasets to be analysed (1) Tree Data; (2) Stump data (3) regeneration from the subplot
+
+## (1) Tree Data#####
+###There are three dataset which need to be combined before since we need all variables in a single file. That way it will be hand to proceed 
+#Files are: 
+#(i)Regeneration_Plot_Form.csv
+#(ii)Regeneration_Plot_Form-stems.csv
+#(iii)Regeneration_Plot_Form-trees.csv
+
+###Importing the Files in R
+plots = read.csv(file = "Regeneration_Plot_Form.csv")
+stems = read.csv(file = "Regeneration_Plot_Form-stems.csv")
+trees = import(file = "Regeneration_Plot_Form-trees.csv")
+
+table(trees$forest_cover)
+
+##the common variable will be used to merge the file: we merge 2 files at a time.
+##we start with stems and trees file: common variable in Tree = KEY; common variable in Stem = PARENT_KEY
+##However, we have the variable called KEY in "stems" data and variable PARENT_KEY in "trees" data.  To avoid confusion it has to be renamed as KEY <- KY for "stems" and PARENT_KEY <- PARENT_KY for "trees" data. 
+##the variable name have been changed manually in excel
+##merging Stems and Trees.
+
+tree_stem = merge(stems, trees, by.x = c("PARENT_KEY"), by.y = c("KEY"), all.x = TRUE) ##all.x = TRUE: the number of observation will be dictated by observations in "stems" data.
+
+##Now we need plot information that are missing in our data "tree_stem". This information is available in "plots" data. 
+##the variable "PARENT_KY" is the common variable in "tree_stem" data that will help us merge with "plots" data using the common variable called "KEY"
+
+plot_tree = merge(plots, tree_stem, by.x = c("KEY"), by.y = c("PARENT_KY"), all.y = TRUE) ##all.y = TRUE: the number of observation will be dictated by observations in "tree_stem" data.
+
+##Now we can proceed with analysis
+##since the stand variables will be presented per ha basis, we need to compute the area of the plot.
+## Calculate plot area of each tree based on the tree location (tree exist in one of the two plots) 
+## In small plot (radius = 1m): trees with dbh less than 5 cm; and large plot (radius = 15m): tree which have dbh >= 5cm. 
+
+###prepare important variables for computation of volume and biomass
+##convert "cbh" to diameter "D"
+plot_tree$D = plot_tree$cbh/pi
+
+###wood basic density: we have to import Naforma file with all the names 
+naforma = import("naforma_names.csv")
+plot_tree.1  =  merge(plot_tree, naforma, by.x = c("latin_name_id"), by.y = c("abre"), all.x = TRUE)
+plot_tree.1$new_name  = ifelse(plot_tree.1$latin_name_id == "other", plot_tree.1$latin_name_other, plot_tree.1$botanical_name)
+
+##separate the new_name into species and genus
+# load stringr library
+#install.packages("stringr")
+library(stringr)
+
+# Split name column into firstname and last name
+plot_tree.1[c('genus', 'species')] <- str_split_fixed(plot_tree.1$new_name, " ", 2)
+
+###getting the wood density using the BIOMASS package that extract the values from the data base
+library("BIOMASS")
+library(terra)
+#install.packages("terra", type = "binary")
+Taxo <- correctTaxo(genus = plot_tree.1$genus, species = plot_tree.1$species)
+plot_tree.1$genusCorr <- Taxo$genusCorrected
+plot_tree.1$speciesCorr <- Taxo$speciesCorrected
+plot_tree.1$nameModified  = Taxo$nameModified
+
+
+# Retrieving APG III Families and Orders from Genus names
+APG <- getTaxonomy(plot_tree.1$genusCorr, findOrder = TRUE)
+plot_tree.1$familyAPG <- APG$family
+plot_tree.1$orderAPG <- APG$order
+
+# 2-RETRIEVE WOOD DENSITY
+dataWD <- getWoodDensity(
+  genus = plot_tree.1$genusCorr,
+  species = plot_tree.1$speciesCorr,
+  stand = plot_tree.1$plotID)
+
+plot_tree.1$WD = dataWD$meanWD
+
+plot_tree_stem = plot_tree.1
+
+##establishing the variable "area"
+plot_tree_stem$area = with(plot_tree_stem, ifelse(D<4.7, pi*(1/100)^2, pi*(15/100)^2))
+plot_tree_stem$ht = with(plot_tree_stem, ifelse(cover_id =="BA", 1.3+37.0396*(1-exp(-0.03778*D^0.6063)),
+                                                ifelse(cover_id=="CL", 1.3+24.9862*(1-exp(-0.0579*D^0.7682)),
+                                                       ifelse(cover_id =="BT", 1.3+37.0396*(1-exp(-0.03778*D^0.6063)),0))))
+
+##computation of stand parameters, i.e. basal area, biomass, volume and number of trees per ha
+library(dplyr)
+
+plot_tree_stem.1 = mutate(plot_tree_stem, G = ifelse(!is.na(D), 0.0000785*D^2/area,0),
+                          B = ifelse(!is.na(D) & cover_id =="MW", 0.1027*D^2.479/1000/area,           
+## Mugasha et al., 2013
+                                     ifelse(!is.na(D) & cover_id =="BA", 0.0292*D^2.0647*ht^1.0146/1000/area,     
+## Mugasha et al., 2016 (Book Chapter)
+                                            ifelse(!is.na(D) & cover_id =="CL", 0.0873*(WD*D^2*ht)^0.9458/1000/area, ##Mugasha et al., 2016 (Article)
+                                                  ifelse(!is.na(D) & cover_id =="BT", 1.2013*D^1.5076/1000/area,0)))),     ##Makero et al., 2016  
+                          N = ifelse(!is.na(D), 1/area,0),
+                          V = ifelse(!is.na(D) & cover_id =="MW", (0.00016*D^2.463)/area,                       
+##   ### Mauya et al., 2014
+                                     ifelse(!is.na(D) & cover_id =="BA", 0.00009*D^2.0993*ht^0.4914/area,     
+## Mugasha et al., 2016 (Book Chapter)
+                                            ifelse(!is.na(D) & cover_id =="CL", 0.000076*D^2.3488*ht^0.3848/area, ##Mugasha et al., 2016 (Article)
+                                                   ifelse(!is.na(D) & cover_id =="BT", 0.00042*D^1.5009*ht^0.6419/area,0)))))    ##Makero et al., 2016      
+
+##insert diameter classes
+plot_tree_stem.1$class = with(plot_tree_stem.1, ifelse(D<4.7, "0-5", 
+                                                       ifelse(D<10, "5-10",
+                                                              ifelse(D<15, "10-15",
+                                                                     ifelse(D<20, "15-20",
+                                                                            ifelse(D<25, "20-25",
+                                                                                   ifelse(D<30, "25-30", "30>")))))))
+
+
+
+###Overall stand parameters per ha for trees (live and dead)
+stand_trees = plot_tree_stem.1%>%
+  group_by(location.plot_id, location.village_id, health_id)%>%
+  summarise(Basal_area = sum(G),
+            Biomass = sum(B),
+            stems = sum(N),
+            Volume = sum(V))
+
+###Overall stand parameters per ha for trees (combining live and dead)
+stand_trees_all = plot_tree_stem.1%>%
+  group_by(location.plot_id, location.village_id)%>%
+  summarise(Basal_area = sum(G),
+            Biomass = sum(B),
+            stems = sum(N),
+            Volume = sum(V))
+
+export(stand_trees, "stand_parameters_trees_based_health_status - 070522.xlsx")
+
+##Assess distribution by diameter classes
+stand_trees.1 = plot_tree_stem.1%>%
+  group_by(location.plot_id,class)%>%
+  summarise(stems = sum(N)/18)
+
+library(rio)
+##Export to excel to plot class versus stems
+export(stand_trees.1, "class_stems.xlsx")
+
+#####WORKING WITH STUMPS: BIOMASS LOST THROUGH TREE CUTTING####
+###Importing the Files in R
+
+stumps = read.csv(file = "Regeneration_Plot_Form-stumps.csv")
+
+###Include the vegetation type from the tree data
+
+cover = plot_tree_stem[,c("KEY", "plot_id1", "cover_id", "forest_cover", "location.slope_radius")]
+
+##remove duplicates
+library(data.table)
+cover.1 = unique(setDT(cover), by = c("KEY", "plot_id1", "cover_id", "forest_cover", "location.slope_radius")) ## remove duplicates values
+
+plots_stump = merge(cover.1, stumps, by.x = c("KEY"), by.y = c("PARENT_KEY"), all.y = TRUE) ##all.y = TRUE since the "stumps" data is the determinant of number of observations in the resulting "plots_stumps" data
+
+
+###get wood density process#####
+###the names in our data base have to be translated in the long form####
+naforma = import("naforma_names.csv")
+plot_stump.1  =  merge(plots_stump, naforma, by.x = c("stump_latin_name_id"), by.y = c("abre"), all.x = TRUE)
+plot_stump.1$new_name  = ifelse(plot_stump.1$stump_latin_name_id == "other", plot_stump.1$stump_latin_name_other, plot_stump.1$botanical_name)
+
+##separate the new_name into species and genus
+# load stringr library
+library(stringr)
+
+# Split name column into genus and species
+plot_stump.2 = plot_stump.1%>%
+  separate(new_name, c('genus', 'species'))
+
+library(BIOMASS)
+Taxo <- correctTaxo(genus = plot_stump.2$genus, species = plot_stump.2$species)
+plot_stump.2$genusCorr <- Taxo$genusCorrected
+plot_stump.2$speciesCorr <- Taxo$speciesCorrected
+plot_stump.2$nameModified  = Taxo$nameModified
+
+# Retrieving APG III Families and Orders from Genus names
+APG <- getTaxonomy(plot_stump.2$genusCorr, findOrder = TRUE)
+plot_stump.2$familyAPG <- APG$family
+plot_stump.2$orderAPG <- APG$order
+
+# 2-RETRIEVE WOOD DENSITY
+dataWD <- getWoodDensity(
+  genus = plot_stump.2$genusCorr,
+  species = plot_stump.2$speciesCorr,
+  stand = plot_stump.2$plotID)
+
+plot_stump.2$WD = dataWD$meanWD
+
+########################
+###################
+#############
+
+##Converts the stump perimeter to diameter
+plots_stumps = plot_stump.2
+plots_stumps$SD = plots_stumps$stump_cbh/pi
+
+##Plot area 
+plots_stumps$area = pi*(15/100)^2
+
+names(plots_stumps)
+
+
+####Preparation of important variable for volume and biomass estimation
+###estimate D from the SDplots_stumps
+plots_stumps$D = -0.8812+0.86696*(plots_stumps$stump_cbh/pi)
+
+##estimate height
+plots_stumps$ht = with(plots_stumps, ifelse(cover_id =="BA", 1.3+37.0396*(1-exp(-0.03778*D^0.6063)),
+                                                ifelse(cover_id=="CL", 1.3+24.9862*(1-exp(-0.0579*D^0.7682)),
+                                                       ifelse(cover_id =="BT", 1.3+37.0396*(1-exp(-0.03778*D^0.6063)),0))))
+
+plots_stumps.1 = mutate(plots_stumps, G = ifelse(!is.na(D), 0.0000785*D^2/area,0),
+                                           B = ifelse(cover_id =="MW", 0.1027*D^2.479/1000/area,           ## Mugasha et al., 2013
+                                                      ifelse(cover_id =="BA", 0.0292*D^2.0647*ht^1.0146/1000/area,     ## Mugasha et al., 2016 (Book Chapter)
+                                                             ifelse(cover_id =="CL", 0.0873*(WD*D^2*ht)^0.9458/1000/area, ##Mugasha et al., 2016 (Article)
+                                                                    ifelse(cover_id =="BT", 1.2013*D^1.5076/1000/area,       ##Makero et al., 2016  
+                                                                           ifelse(is.na(cover_id),0.1027*D^2.479/1000/area,0))))),    ## Mugasha et al., 2013
+                                           N = ifelse(D>0, 1/area,0),
+                                           V = ifelse(cover_id =="MW", 0.00016*D^2.463/area,                       ##   ### Mauya et al., 2014
+                                                      ifelse(cover_id =="BA", 0.00009*D^2.0993*ht^0.4914/area,     ## Mugasha et al., 2016 (Book Chapter)
+                                                             ifelse(cover_id =="CL", 0.000076*D^2.3488*ht^0.3848/area, ##Mugasha et al., 2016 (Article)
+                                                                    ifelse(cover_id =="BT", 0.00042*D^1.5009*ht^0.6419/area, ##Makero et al.,
+                                                                           ifelse(is.na(cover_id),0.00016*D^2.463/area,0))))))  ##   ### Mauya et al., 2014
+
+##Compute per plot stand parameters (N and Biomass) of the stumps
+table(plots_stumps.1$cover_id)
+stump_cover.2 = plots_stumps.1%>%
+  group_by(plot_id1)%>%
+  summarise(Basal_area_stump = sum(G),
+            Biomass_stump = sum(B),
+            stems_stump = sum(N),
+            Volume_stump = sum(V))
+
+stump_cover.3 = stump_cover.2[!is.na(stump_cover.2$Biomass_stump),]
+
+write.csv(stump_cover.3, "stump_stand_results_revised_16.06.2022.csv")
+
+##Combining tree and stump results
+##tree data: stand_trees_all
+
+stand_trees_all$plot_id1 = stand_trees_all$location.plot_id
+tree_data = stand_trees_all[,c("plot_id1","Basal_area", "Biomass", "stems", "Volume")]
+
+##merging the stump and tree data
+Stumps_trees = merge(tree_data, stump_cover.3, by = c("plot_id1"), all.x = TRUE)
+
+##Export Results
+export(Stumps_trees, "stand_parameters_biomass_volume_number_stems_stump - 16.06.2022.xlsx")
+
+###Species Richness
+##Tree data = plot_tree_stem_
+names(plot_tree_stem_)
+
+## Updated from the correct namesfrom the BIOMASS Package
+##for trees, the data used is "plot_tree_1"
+##to get the species encountered in a plot we have to remove the duplicates
+plot_tree.1$plot_id1 = plot_tree.1$location.plot_id
+rich.1 = unique(setDT(plot_tree.1), by = c("location.plot_id", "genusCorr", "speciesCorr")) 
+rich.2 = rich.1[, c("plot_id1", "genusCorr", "speciesCorr")]
+rich.2$k = 2
+##richness to each plot###
+
+richness = rich.1%>%
+  group_by(plot_id1)%>%
+  summarise(species_richness = length(genusCorr))
+
+
+export(richness, "Tree_richness_15.04.2022.xlsx")
+
+#####Combining Tree and stump data: stump and tree data have to be concatenated######
+##prepare stump data: "plot_stump.2"
+rich_stump.1 = unique(setDT(plot_stump.2), by = c("plot_id1", "genusCorr", "speciesCorr")) 
+rich_stump.1$k = 1
+rich_stump.2 = rich_stump.1[, c("plot_id1", "genusCorr", "speciesCorr", "k")]
+
+##merge the stump and tree data()
+all  = rbind(rich.2, rich_stump.2)
+all.1 = unique(setDT(all), by = c("plot_id1", "genusCorr", "speciesCorr")) 
+
+richness_all = all.1%>%
+  group_by(plot_id1)%>%
+  summarise(species_richness_tree_stumps = length(genusCorr))
+
+export(richness_all, "Tree_stumps_richness_15.04.2022.xlsx")
